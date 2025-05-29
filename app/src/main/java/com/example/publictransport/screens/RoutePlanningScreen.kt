@@ -1,3 +1,4 @@
+
 // RoutePlanningScreen.kt
 package com.example.publictransport.ui
 
@@ -26,17 +27,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.publictransport.dgis.Point
 import com.example.publictransport.model.Stop
 import com.example.publictransport.network.JsonLoader
 
 import com.google.android.gms.location.FusedLocationProviderClient
 import kotlinx.coroutines.launch
 import com.example.publictransport.dgis.TwoGisRouteService
-import com.example.publictransport.model.Route
-import kotlin.math.absoluteValue
-import java.lang.Math.toRadians
-import kotlin.math.*
+
 // Модели ответа
 data class TripResponse(
     val startWalkDistance: Int,
@@ -45,6 +42,7 @@ data class TripResponse(
     val endWalkDuration: String,
     val paths: List<PathResponse>
 )
+
 data class PathResponse(
     val routeId: Long,
     val name: String,
@@ -76,7 +74,7 @@ fun RoutePlanningScreen(
     var variants by remember { mutableStateOf<List<TripResponse>>(emptyList()) }
     var loadingTrips by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
-    var routes by remember { mutableStateOf<List<Route>>(emptyList()) }
+
     val scope = rememberCoroutineScope()
 
     // Загрузка остановок
@@ -84,8 +82,7 @@ fun RoutePlanningScreen(
         loadingStops = true
         try {
             stops = JsonLoader.loadStops(context)
-            routes = JsonLoader.loadRoutes(context)
-            if (stops.isEmpty() || routes.isEmpty()) {
+            if (stops.isEmpty()) {
                 errorMsg = "Не удалось загрузить остановки"
             }
         } catch (e: Exception) {
@@ -303,15 +300,17 @@ fun RoutePlanningScreen(
                                         val eLat = toStop!!.point[0]
                                         val eLong = toStop!!.point[1]
 
-                                        variants = if (fromStop != null && toStop != null) {
-                                            planLocalTripsByName(
-                                                fromQuery    = fromStop!!.name.ru,
-                                                toQuery      = toStop!!.name.ru,
-                                                allRoutes = JsonLoader.loadRoutes(context), // из JsonLoader.loadRoutes(...)
-                                                allStops  = JsonLoader.loadStops(context)
-                                            )
-                                        } else emptyList()
+                                        Log.d("RoutePlanningScreen", "Поиск маршрута: $sLat,$sLong -> $eLat,$eLong")
+
+                                        variants = TwoGisRouteService.fetchRoutes(
+                                            fromLat = sLat, fromLon = sLong,
+                                            toLat = eLat, toLon = eLong,
+                                            modes = listOf("bus", "tram", "trolleybus")
+                                        )
+
+                                        Log.d("RoutePlanningScreen", "Найдено ${variants.size} вариантов")
                                     } catch (e: Exception) {
+                                        Log.e("RoutePlanningScreen", "Ошибка поиска", e)
                                         errorMsg = "Ошибка при поиске маршрутов: ${e.message}"
                                     } finally {
                                         loadingTrips = false
@@ -356,12 +355,15 @@ fun RoutePlanningScreen(
                     }
                 }
 
-                // Результаты: делаем карточки кликабельными
+                // Результаты
                 items(variants) { trip ->
-                    RouteVariantCard(trip, Modifier
-                        .fillMaxWidth()
-                        .clickable { onVariantClick(trip) }    // <- передаём только trip
-                        .padding(vertical = 8.dp)
+                    RouteVariantCard(
+                        trip = trip,
+                        onClick = {
+                            Log.d("RoutePlanningScreen", "Клик по варианту маршрута")
+
+                            onVariantClick(trip)
+                        }
                     )
                 }
 
@@ -560,10 +562,17 @@ private fun RouteSegmentChip(
 
 
 @Composable
-private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) {
+private fun RouteVariantCard(
+    trip: TripResponse,
+    onClick: () -> Unit = {} // Добавляем параметр onClick
+) {
     Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }, // Добавляем обработчик клика
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
         shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.cardElevation(6.dp)
     ) {
@@ -577,14 +586,16 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Время
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                CircleShape
+                            )
                             .padding(8.dp)
                     ) {
                         Icon(
@@ -595,18 +606,13 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                         )
                     }
                     Column {
-                        // Парсим hh:mm:ss
-                        val parts = trip.paths.first().rideDuration.split(":").map { it.toInt() }
-                        val hours = parts.getOrNull(0) ?: 0
-                        val mins  = parts.getOrNull(1) ?: 0
-                        val durationText = if (hours > 0) {
-                            "${hours} ч ${mins} мин"
-                        } else {
-                            "${mins} мин"
-                        }
+                        val (h, m, _) = trip.paths.first().rideDuration.split(":")
+                        val totalMins = h.toInt() * 60 + m.toInt()
                         Text(
-                            text = durationText,
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                            text = "$totalMins мин",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold
+                            )
                         )
                         Text(
                             text = "Время в пути",
@@ -616,7 +622,6 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                     }
                 }
 
-                // Расстояние
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -628,15 +633,13 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                         tint = MaterialTheme.colorScheme.primary
                     )
                     val dist = trip.paths.first().rideDistance
-                    val distText = if (dist >= 1000) {
-                        // 1 знак после запятой
-                        String.format("%.1f км", dist / 1000f)
-                    } else {
-                        "$dist м"
-                    }
+                    val km = dist / 1000
+                    val metres = dist % 1000
                     Text(
-                        text = distText,
-                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium)
+                        text = if (km > 0) "$km.${"$metres".padStart(3, '0').take(1)} км" else "$metres м",
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.Medium
+                        )
                     )
                 }
             }
@@ -685,7 +688,7 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                                 tint = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Text(
-                                text = path.name,
+                                text = path.routeId.toString(),
                                 style = MaterialTheme.typography.labelLarge.copy(
                                     fontWeight = FontWeight.Bold
                                 ),
@@ -741,194 +744,26 @@ private fun RouteVariantCard(trip: TripResponse, modifier: Modifier = Modifier) 
                     }
                 }
             }
-        }
-    }
-}
 
-// 1. Добавляем локальную функцию-планировщик
-private const val CLOSE_THRESHOLD_METERS = 200.0
-
-/**
- * Ищет по названиям, возвращает список возможных маршрутов (включая до 1 пересадки).
- * Если точки ближе CLOSE_THRESHOLD_METERS — возвращает единственный пеший вариант.
- *
- * @return List<TripResponse>
- */
-fun planLocalTripsByName(
-    fromQuery: String,
-    toQuery: String,
-    allRoutes: List<com.example.publictransport.model.Route>,
-    allStops: List<com.example.publictransport.model.Stop>
-): List<TripResponse> {
-    // 1) Найдём ВСЕ остановки, чьё имя содержит подстроку
-    val fromCandidates = allStops.filter {
-        it.name.ru.contains(fromQuery, ignoreCase = true) ||
-                it.name.en.contains(fromQuery, ignoreCase = true)
-    }
-    val toCandidates = allStops.filter {
-        it.name.ru.contains(toQuery, ignoreCase = true) ||
-                it.name.en.contains(toQuery, ignoreCase = true)
-    }
-
-    // 2) Построим индексы по ID -> Stop, а также по маршруту->список направлений
-    val stopById = allStops.associateBy { it.id }
-
-    val results = mutableListOf<TripResponse>()
-
-    // для каждой пары кандидатов от/до
-    fromCandidates.forEach { fromStop ->
-        toCandidates.forEach { toStop ->
-            // 3) если очень близко — пешком
-            val d = haversine(
-                fromStop.point[0], fromStop.point[1],
-                toStop.point[0],   toStop.point[1]
-            )
-            if (d <= CLOSE_THRESHOLD_METERS) {
-                val sec = (d / 1.4).roundToInt()
-                results += TripResponse(
-                    startWalkDistance = d.roundToInt(),
-                    startWalkDuration = formatSec(sec),
-                    endWalkDistance   = 0,
-                    endWalkDuration   = "00:00:00",
-                    paths = listOf(PathResponse(
-                        routeId        = 0L,
-                        name           = "пешком",
-                        directionIndex = 0,
-                        walkDistance   = d.roundToInt(),
-                        walkDuration   = formatSec(sec),
-                        rideDistance   = 0,
-                        rideDuration   = "00:00:00",
-                        stops          = listOf(
-                            com.example.publictransport.dgis.Point(fromStop.point[0], fromStop.point[1]),
-                            com.example.publictransport.dgis.Point(toStop.point[0],   toStop.point[1])
-                        )
-                    ))
+            // Визуальная подсказка для клика
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Нажмите для просмотра на карте",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
                 )
-                return@forEach
-            }
-
-            // 4) сначала пробуем без пересадок
-            allRoutes.forEach { route ->
-                route.directions.forEach { dir ->
-                    val stopIds = dir.stops.map { it.stopId }
-                    val iFrom = stopIds.indexOf(fromStop.id)
-                    val iTo   = stopIds.indexOf(toStop.id)
-                    if (iFrom>=0 && iTo>=0 && iFrom!=iTo) {
-                        val range = if (iFrom < iTo) iFrom..iTo else iFrom downTo iTo
-                        val pts = range.mapNotNull { idx ->
-                            stopById[ stopIds[idx] ]?.point?.let { coords->
-                                com.example.publictransport.dgis.Point(coords[0], coords[1])
-                            }
-                        }
-                        if (pts.size>=2) {
-                            val dist = abs(
-                                dir.stops[iTo].offsetDistance - dir.stops[iFrom].offsetDistance
-                            ).roundToInt()
-                            results += TripResponse(
-                                startWalkDistance = 0,
-                                startWalkDuration = "00:00:00",
-                                endWalkDistance   = 0,
-                                endWalkDuration   = "00:00:00",
-                                paths = listOf(PathResponse(
-                                    routeId        = route.id,
-                                    name           = route.name.ru,
-                                    directionIndex = dir.index,
-                                    walkDistance   = 0,
-                                    walkDuration   = "00:00:00",
-                                    rideDistance   = dist,
-                                    rideDuration   = "00:00:00",
-                                    stops          = pts
-                                ))
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 5) если прямых нет — один transfer
-            //    находим все маршруты, где есть fromStop, и где есть toStop
-            val fromRoutes = allRoutes.flatMap { r-> r.directions.map{ r to it } }
-                .filter { (_, dir) -> dir.stops.any{ it.stopId==fromStop.id } }
-            val toRoutes   = allRoutes.flatMap { r-> r.directions.map{ r to it } }
-                .filter { (_, dir) -> dir.stops.any{ it.stopId==toStop.id   } }
-
-            fromRoutes.forEach { (rA, dA) ->
-                toRoutes.forEach { (rB, dB) ->
-                    // ищем точки пересадки: общие stopId
-                    val sA = dA.stops.map{ it.stopId }.toSet()
-                    val sB = dB.stops.map{ it.stopId }.toSet()
-                    val common = sA.intersect(sB)
-                    common.forEach { transferId ->
-                        val iA = dA.stops.indexOfFirst{ it.stopId==transferId }
-                        val iB = dB.stops.indexOfFirst{ it.stopId==transferId }
-                        val iFrom = dA.stops.indexOfFirst{ it.stopId==fromStop.id }
-                        val iTo   = dB.stops.indexOfFirst{ it.stopId==toStop.id   }
-                        if (iA>=0 && iFrom>=0 && iB>=0 && iTo>=0) {
-                            // сегмент A: от fromStop до transfer
-                            val segA = (if(iFrom< iA) iFrom..iA else iFrom downTo iA)
-                            val ptsA = segA.mapNotNull { idx ->
-                                stopById[dA.stops[idx].stopId]?.point?.let{ p->
-                                    com.example.publictransport.dgis.Point(p[0],p[1])
-                                }
-                            }
-                            // сегмент B: от transfer до toStop
-                            val segB = (if(iB< iTo) iB..iTo else iB downTo iTo)
-                            val ptsB = segB.mapNotNull { idx ->
-                                stopById[dB.stops[idx].stopId]?.point?.let{ p->
-                                    com.example.publictransport.dgis.Point(p[0],p[1])
-                                }
-                            }
-                            if (ptsA.size>=2 && ptsB.size>=2) {
-                                val distA = abs(dA.stops[iA].offsetDistance - dA.stops[iFrom].offsetDistance).roundToInt()
-                                val distB = abs(dB.stops[iTo].offsetDistance - dB.stops[iB].offsetDistance).roundToInt()
-                                results += TripResponse(
-                                    startWalkDistance = 0,
-                                    startWalkDuration = "00:00:00",
-                                    endWalkDistance   = 0,
-                                    endWalkDuration   = "00:00:00",
-                                    paths = listOf(
-                                        PathResponse(
-                                            routeId        = rA.id,
-                                            name           = rA.name.ru,
-                                            directionIndex = dA.index,
-                                            walkDistance   = 0, walkDuration="00:00:00",
-                                            rideDistance   = distA, rideDuration="00:00:00",
-                                            stops          = ptsA
-                                        ),
-                                        PathResponse(
-                                            routeId        = rB.id,
-                                            name           = rB.name.ru,
-                                            directionIndex = dB.index,
-                                            walkDistance   = 0, walkDuration="00:00:00",
-                                            rideDistance   = distB, rideDuration="00:00:00",
-                                            stops          = ptsB
-                                        )
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Default.ArrowForward,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                )
             }
         }
     }
-
-    return results
 }
-
-
-// Haversine
-private fun haversine(lat1:Double, lon1:Double, lat2:Double, lon2:Double):Double {
-    val R=6371000.0
-    val dLat=toRadians(lat2-lat1)
-    val dLon=toRadians(lon2-lon1)
-    val a=sin(dLat/2).pow(2.0)+cos(toRadians(lat1))*cos(toRadians(lat2))*sin(dLon/2).pow(2.0)
-    return R*2*atan2(sqrt(a), sqrt(1-a))
-}
-
-// seconds -> HH:MM:SS
-private fun formatSec(sec:Int):String {
-    val h= sec/3600
-    val m=(sec%3600)/60
-    val s= sec%60
-    return "%02d:%02d:%02d".format(h,m,s)}
