@@ -58,7 +58,7 @@ data class PathResponse(
 @Composable
 fun RoutePlanningScreen(
     fusedLocationClient: FusedLocationProviderClient,
-    onVariantClick: (TripResponse) -> Unit
+    onVariantClick: (TripResponse, Stop, Stop) -> Unit
 ) {
     val context = LocalContext.current
 
@@ -362,7 +362,7 @@ fun RoutePlanningScreen(
                         onClick = {
                             Log.d("RoutePlanningScreen", "Клик по варианту маршрута")
 
-                            onVariantClick(trip)
+                            onVariantClick(trip, fromStop!!, toStop!!)
                         }
                     )
                 }

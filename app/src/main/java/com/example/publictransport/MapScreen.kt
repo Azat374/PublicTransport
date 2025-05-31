@@ -311,6 +311,7 @@ import com.yandex.runtime.image.ImageProvider
 import com.yandex.mapkit.geometry.Polyline
 import com.yandex.mapkit.geometry.BoundingBox
 import android.util.Log
+import com.example.publictransport.network.JsonLoader
 
 /**
  * @param fusedLocationClient для центрирования на пользователя
@@ -319,207 +320,58 @@ import android.util.Log
 @Composable
 fun MapScreen(
     fusedLocationClient: FusedLocationProviderClient,
-    routePoints: List<Point>
+     segments: List<Segment>
 ) {
     val context = LocalContext.current
-    var mapView by remember { mutableStateOf<MapView?>(null) }
-    var userPlacemark by remember { mutableStateOf<PlacemarkMapObject?>(null) }
-    var routeLines by remember { mutableStateOf<List<PolylineMapObject>>(emptyList()) }
-    var placemarks by remember { mutableStateOf<List<PlacemarkMapObject>>(emptyList()) }
 
-    Log.d("MapScreen", "Получено ${routePoints.size} точек для отображения")
-    routePoints.forEachIndexed { index, point ->
-        Log.d("MapScreen", "Точка $index: ${point.lat}, ${point.lon}")
-    }
+    // 1) грузим ваши локальные JSON
+    val routes = remember { JsonLoader.loadRoutes(context) }
+    val stops  = remember { JsonLoader.loadStops(context) }
+    val stopsById = stops.associateBy { it.id }
 
-    // Конвертируем точки в формат Yandex
-    val yandexPoints = remember(routePoints) {
-        routePoints.map { dto ->
-            com.yandex.mapkit.geometry.Point(dto.lat, dto.lon)
-        }.also {
-            Log.d("MapScreen", "Сконвертировано ${it.size} Yandex точек")
-        }
-    }
+    // 2) для каждого сегмента ищем маршрут в routes, нужное направление и его остановки
+    val allYandexPolylines = segments.mapIndexed { idx, seg ->
+        // находим маршрут по имени
+        val route = routes.first { it.name.ru == seg.routeName }
+        val dir   = route.directions.first { it.index == seg.directionIndex }
+        // список всех stopId в этом направлении
+        val stopIds = dir.stops.map { it.stopId }
+        val iFrom = stopIds.indexOf(seg.fromStopId)
+        val iTo   = stopIds.indexOf(seg.toStopId)
+        val slice = if (iFrom < iTo)
+            stopIds.subList(iFrom, iTo+1)
+        else
+            stopIds.subList(iTo, iFrom+1).asReversed()
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(factory = { ctx ->
-            val mv = MapView(ctx).apply {
-                if (yandexPoints.isNotEmpty()) {
-                    // Центрируем камеру на первой точке
-                    map.move(
-                        CameraPosition(yandexPoints.first(), 14f, 0f, 0f),
-                        Animation(Animation.Type.SMOOTH, 1f),
-                        null
-                    )
-                }
+        // и мапим их в Yandex-точки
+        val pts = slice.mapNotNull { sid ->
+            stopsById[sid]?.point?.let { (lat, lon) ->
+                com.yandex.mapkit.geometry.Point(lat, lon)
             }
-            mapView = mv
+        }
+        idx to pts
+    }
 
-            // Очищаем предыдущие объекты
+    Box(Modifier.fillMaxSize()) {
+        AndroidView({ ctx ->
+            val mv = MapView(ctx)
             mv.map.mapObjects.clear()
 
-            if (yandexPoints.isNotEmpty()) {
-                try {
-                    // 1. Добавляем маркеры для всех точек
-                    yandexPoints.forEachIndexed { index, point ->
-                        val iconRes = when (index) {
-                            0 -> R.drawable.ic_start_point // Начальная точка
-                            yandexPoints.size - 1 -> R.drawable.ic_end_point // Конечная точка
-                            else -> R.drawable.bus_stop // Промежуточные остановки
-                        }
-
-                        try {
-                            val bitmap = getBitmapFromVectorDrawable(ctx, iconRes)
-                            val placemark = mv.map.mapObjects.addPlacemark(point, ImageProvider.fromBitmap(bitmap))
-                            placemarks = placemarks + placemark
-                            Log.d("MapScreen", "Добавлен маркер $index в точке ${point.latitude}, ${point.longitude}")
-                        } catch (e: Exception) {
-                            Log.e("MapScreen", "Ошибка добавления маркера $index", e)
-                            // Fallback: простой маркер
-                            val placemark = mv.map.mapObjects.addPlacemark(point)
-                            placemarks = placemarks + placemark
-                        }
-                    }
-
-                    // 2. Добавляем линии между соседними точками (сегментированный маршрут)
-                    if (yandexPoints.size >= 2) {
-                        // Создаем сегменты маршрута
-                        for (i in 0 until yandexPoints.size - 1) {
-                            val segmentPoints = listOf(yandexPoints[i], yandexPoints[i + 1])
-                            val polyline = mv.map.mapObjects.addPolyline(Polyline(segmentPoints))
-
-                            // Разные цвета для разных типов сегментов
-                            when (i) {
-                                0 -> {
-                                    // Первый сегмент (подход к остановке)
-                                    polyline.setStrokeColor(0xFF00AA00.toInt()) // Зеленый
-                                    polyline.setStrokeWidth(4f)
-                                }
-                                yandexPoints.size - 2 -> {
-                                    // Последний сегмент (от остановки к цели)
-                                    polyline.setStrokeColor(0xFFAA0000.toInt()) // Красный
-                                    polyline.setStrokeWidth(4f)
-                                }
-                                else -> {
-                                    // Транспортные сегменты
-                                    polyline.setStrokeColor(0xFF0066CC.toInt()) // Синий
-                                    polyline.setStrokeWidth(6f)
-                                }
-                            }
-
-                            routeLines = routeLines + polyline
-                            Log.d("MapScreen", "Добавлен сегмент $i -> ${i+1}")
-                        }
-                    }
-
-                    // 3. Подгоняем камеру под все точки
-                    if (yandexPoints.size > 1) {
-                        val minLat = yandexPoints.minOf { it.latitude }
-                        val maxLat = yandexPoints.maxOf { it.latitude }
-                        val minLon = yandexPoints.minOf { it.longitude }
-                        val maxLon = yandexPoints.maxOf { it.longitude }
-
-                        val boundingBox = BoundingBox(
-                            com.yandex.mapkit.geometry.Point(minLat, minLon),
-                            com.yandex.mapkit.geometry.Point(maxLat, maxLon)
-                        )
-
-                        val cameraPosition = mv.map.cameraPosition(boundingBox)
-                        mv.map.move(
-                            cameraPosition,
-                            Animation(Animation.Type.SMOOTH, 1.5f),
-                            null
-                        )
-
-                        Log.d("MapScreen", "Камера подогнана под маршрут: $minLat,$minLon - $maxLat,$maxLon")
-                    }
-
-                } catch (e: Exception) {
-                    Log.e("MapScreen", "Ошибка при добавлении маршрута на карту", e)
-                }
+            // выставляем камеру по первой точке
+            allYandexPolylines.firstOrNull()?.second?.firstOrNull()?.let {
+                mv.map.move(CameraPosition(it, 14f,0f,0f), Animation(Animation.Type.SMOOTH,1f),null)
             }
 
-            mv
-        }, modifier = Modifier.fillMaxSize())
-
-        // Кнопка "центрировать на мне"
-        IconButton(
-            onClick = {
-                if (ActivityCompat.checkSelfPermission(
-                        context, Manifest.permission.ACCESS_FINE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    val req = LocationRequest.Builder(5000)
-                        .setMinUpdateIntervalMillis(3000)
-                        .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-                        .build()
-
-                    fusedLocationClient.requestLocationUpdates(
-                        req,
-                        object : LocationCallback() {
-                            override fun onLocationResult(result: LocationResult) {
-                                val loc = result.lastLocation ?: return
-                                val pt = com.yandex.mapkit.geometry.Point(loc.latitude, loc.longitude)
-                                val mv = mapView ?: return
-
-                                try {
-                                    // Удаляем предыдущий маркер пользователя
-                                    userPlacemark?.let { mv.map.mapObjects.remove(it) }
-
-                                    // Добавляем новый маркер
-                                    val bmp = getBitmapFromVectorDrawable(context, R.drawable.ic_user_location)
-                                    val img = ImageProvider.fromBitmap(bmp)
-                                    userPlacemark = mv.map.mapObjects.addPlacemark(pt, img)
-
-                                    // Центрируем камеру на пользователе
-                                    mv.map.move(
-                                        CameraPosition(pt, 17f, 0f, 0f),
-                                        Animation(Animation.Type.SMOOTH, 0.8f),
-                                        null
-                                    )
-
-                                    Log.d("MapScreen", "Позиция пользователя: ${loc.latitude}, ${loc.longitude}")
-                                } catch (e: Exception) {
-                                    Log.e("MapScreen", "Ошибка центрирования на пользователе", e)
-                                }
-
-                                // Останавливаем обновления после получения позиции
-                                fusedLocationClient.removeLocationUpdates(this)
-                            }
-                        },
-                        context.mainLooper
-                    )
+            // рисуем каждый сегмент своим цветом
+            val colors = listOf(0xFF0066CC.toInt(), 0xFFFF8800.toInt(), 0xFF33AA33.toInt())
+            allYandexPolylines.forEach { (idx, polyPts) ->
+                if (polyPts.size >= 2) {
+                    val poly = mv.map.mapObjects.addPolyline(Polyline(polyPts))
+                    poly.setStrokeWidth(6f)
+                    poly.setStrokeColor(colors[idx % colors.size])
                 }
-            },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp)
-        ) {
-            Icon(
-                painter = painterResource(id = R.drawable.focus_location),
-                contentDescription = "Центрировать на мне"
-            )
-        }
-    }
-}
-
-/** Вспомогательная функция для конвертации в Bitmap из VectorDrawable */
-private fun getBitmapFromVectorDrawable(context: Context, drawableId: Int): Bitmap {
-    return try {
-        val drawable = AppCompatResources.getDrawable(context, drawableId)
-            ?: error("Drawable not found")
-        val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: 48
-        val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: 48
-        val bitmap = createBitmap(width, height)
-        val canvas = Canvas(bitmap)
-        drawable.setBounds(0, 0, width, height)
-        drawable.draw(canvas)
-        bitmap
-    } catch (e: Exception) {
-        Log.e("MapScreen", "Ошибка создания bitmap для drawable $drawableId", e)
-        // Fallback: создаем простой цветной битмап
-        createBitmap(48, 48).apply {
-            eraseColor(0xFF0066CC.toInt())
-        }
+            }
+            mv
+        }, Modifier.fillMaxSize())
     }
 }

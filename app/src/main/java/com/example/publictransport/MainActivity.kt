@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -40,6 +41,13 @@ import com.yandex.mapkit.MapKitFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+data class Segment(
+    val routeName: String,
+    val directionIndex: Int,
+    val fromStopId: Long,
+    val toStopId: Long
+)
 
 class MainActivity : ComponentActivity() {
     private val routeListState = mutableStateOf<List<Route>>(emptyList())
@@ -131,8 +139,8 @@ class MainActivity : ComponentActivity() {
                                 LaunchedEffect(Unit) { selectedTab = 1 }
                                 RoutePlanningScreen(
                                     fusedLocationClient = fusedLocationClient,
-                                    onVariantClick = { trip ->
-                                        handleTripVariantClick(trip, navController)
+                                    onVariantClick = { trip,from,to  ->
+                                        handleTripVariantClick(trip,from,to, navController)
                                     }
                                 )
                             }
@@ -154,15 +162,18 @@ class MainActivity : ComponentActivity() {
 
                             // Карта с общественным транспортом
                             composable(
-                                "mapTrip/{coords}",
-                                arguments = listOf(navArgument("coords") { type = NavType.StringType })
+                                "mapTrip/{segments}",
+                                arguments = listOf(navArgument("segments"){ type = NavType.StringType })
                             ) { back ->
-                                val enc = back.arguments!!.getString("coords") ?: ""
-                                val pts = parseRoutePoints(Uri.decode(enc))
-                                MapScreen(
-                                    fusedLocationClient = fusedLocationClient,
-                                    routePoints = pts
-                                )
+                                val encoded = back.arguments!!.getString("segments")!!
+                                val segments = Uri.decode(encoded)
+                                    .split(";")
+                                    .mapNotNull { chunk ->
+                                        chunk.split(":").takeIf{ it.size==4 }?.let {
+                                            Segment(it[0], it[1].toInt(), it[2].toLong(), it[3].toLong())
+                                        }
+                                    }
+                                MapScreen(fusedLocationClient, segments)
                             }
                         }
                     }
@@ -171,35 +182,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Обрабатываем клик — сразу берём все точки из TripResponse.paths.stops */
     private fun handleTripVariantClick(
         trip: TripResponse,
-        navController: androidx.navigation.NavController
+        fromStop: Stop,
+        toStop: Stop,
+        navController: NavController
     ) {
-        try {
-            Log.d("MainActivity", "Обработка клика по варианту маршрута")
-            // 1) Собираем все Point, удаляем дубли
-            val pts = trip.paths
-                .flatMap { it.stops }
-                .distinctBy { it.lat to it.lon }
-
-            if (pts.isEmpty()) {
-                Log.e("MainActivity", "Нет точек для отображения")
-                return
-            }
-
-            // 2) Ограничиваем до 50, сериализуем
-            val limited = pts.take(50)
-            val serialized = limited.joinToString("|") { "${it.lat};${it.lon}" }
-
-            // 3) URL-энкод и переход
-            val encoded = Uri.encode(serialized)
-            navController.navigate("mapTrip/$encoded")
-
-            Log.d("MainActivity", "Навигация к карте с ${limited.size} точками")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Ошибка при обработке клика", e)
+        // 1) из каждого PathResponse строим Segment
+        val segments = trip.paths.map { path ->
+            Segment(
+                routeName      = path.name,
+                directionIndex = path.directionIndex,
+                fromStopId     = fromStop.id,
+                toStopId       = toStop.id
+            )
         }
+        // 2) сериализуем в строку вида "name1:dir1:from1:to1;name2:dir2:from2:to2;…"
+        val encoded = Uri.encode(segments.joinToString(";") {
+            "${it.routeName}:${it.directionIndex}:${it.fromStopId}:${it.toStopId}"
+        })
+        navController.navigate("mapTrip/$encoded")
     }
 
     /** Парсим строку "lat;lon|lat;lon…" обратно в List<Point> */
