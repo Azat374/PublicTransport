@@ -1,6 +1,7 @@
 // MapScreenWithRoutes.kt
 package com.example.publictransport.screens
 
+import android.Manifest
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -16,28 +17,33 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.DirectionsSubway
 import androidx.compose.material.icons.filled.Tram
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.core.content.PermissionChecker
 import androidx.core.graphics.createBitmap
 import com.example.publictransport.R
 import com.example.publictransport.model.Route
 import com.example.publictransport.model.Stop
 import com.example.publictransport.network.JsonLoader
 import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.yandex.mapkit.Animation
 import com.yandex.mapkit.geometry.Point
 import com.yandex.mapkit.geometry.Polyline
-import com.yandex.mapkit.map.CameraPosition
-import com.yandex.mapkit.map.PolylineMapObject
-import com.yandex.mapkit.map.PlacemarkMapObject
 import com.yandex.mapkit.map.CameraListener
+import com.yandex.mapkit.map.CameraPosition
 import com.yandex.mapkit.map.Map
+import com.yandex.mapkit.map.MapObjectCollection
+import com.yandex.mapkit.map.PlacemarkMapObject
+import com.yandex.mapkit.map.PolylineMapObject
 import com.yandex.mapkit.mapview.MapView
 import com.yandex.runtime.image.ImageProvider
 import kotlinx.coroutines.delay
@@ -78,6 +84,10 @@ fun MapScreenWithRoutes(
     // Список плейсмарков остановок для управления видимостью
     var stopPlacemarks by remember { mutableStateOf<List<PlacemarkMapObject>>(emptyList()) }
 
+    // Ссылка на MapView и на пользовательский маркер
+    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+    var userPlacemark by remember { mutableStateOf<PlacemarkMapObject?>(null) }
+
     // Минимальный зум для отображения остановок
     val minZoomForStops = 14f
 
@@ -110,7 +120,7 @@ fun MapScreenWithRoutes(
                                 bus.isWaiting = false
                                 bus.hasLeftStop = false // помечаем, что нужно покинуть зону остановки
                             }
-                            // Если автобус ждет, не двигаем его
+                            // Если автобус ждёт — не двигаем его
                             return@forEach
                         }
 
@@ -149,7 +159,7 @@ fun MapScreenWithRoutes(
 
                                 // Проверяем, не та ли это остановка, где мы уже останавливались
                                 if (bus.hasLeftStop && nearestStopIndex != bus.lastStopIndex) {
-                                    // Автобус подошел к новой остановке, начинаем ожидание
+                                    // Автобус подошёл к новой остановке, начинаем ожидание
                                     bus.isWaiting = true
                                     bus.waitStartTime = currentTime
                                     bus.lastStopIndex = nearestStopIndex
@@ -161,7 +171,7 @@ fun MapScreenWithRoutes(
                                     bus.placemark.geometry = interpolatedPosition
                                 }
                             } else {
-                                // Автобус не рядом с остановкой, помечаем что покинул зону
+                                // Автобус не рядом с остановкой, помечаем, что покинул зону
                                 if (!bus.hasLeftStop) {
                                     bus.hasLeftStop = true
                                 }
@@ -190,166 +200,253 @@ fun MapScreenWithRoutes(
             )
         }
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
         ) {
-            // Показываем выбранные маршруты
-            if (routes.isNotEmpty()) {
-                LazyRow(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+            ) {
+                // Показываем выбранные маршруты
+                if (routes.isNotEmpty()) {
+                    LazyRow(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(routes) { route ->
+                            RouteChip(route = route)
+                        }
+                    }
+                }
+
+                // Карта
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 ) {
-                    items(routes) { route ->
-                        RouteChip(route = route)
+                    if (isLoading) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    } else {
+                        AndroidView(
+                            factory = { ctx ->
+                                MapView(ctx).apply {
+                                    // Сохраняем ссылку, чтобы потом можно было управлять из FAB
+                                    mapViewRef = this
+
+                                    val allPoints = routes
+                                        .flatMap { route ->
+                                            route.directions.flatMap { dir -> dir.stops }
+                                        }
+                                        .mapNotNull { routeStop ->
+                                            stopsMap[routeStop.stopId]?.point
+                                        }
+                                        .map { coords -> Point(coords[0], coords[1]) }
+
+                                    if (allPoints.isNotEmpty()) {
+                                        // Рассчитываем центр точек
+                                        val centerLat = allPoints.map { it.latitude }.average()
+                                        val centerLon = allPoints.map { it.longitude }.average()
+                                        val centerPoint = Point(centerLat, centerLon)
+
+                                        map.move(
+                                            CameraPosition(centerPoint, 12f, 0f, 0f),
+                                            Animation(Animation.Type.SMOOTH, 1f),
+                                            null
+                                        )
+                                    } else {
+                                        // Алматы по умолчанию
+                                        map.move(
+                                            CameraPosition(Point(43.238949, 76.889709), 11f, 0f, 0f),
+                                            Animation(Animation.Type.SMOOTH, 1f),
+                                            null
+                                        )
+                                    }
+
+                                    val mapObjects = map.mapObjects
+                                    val busesForRoutes = mutableListOf<MovingBus>()
+                                    val stopsPlacemarksList = mutableListOf<PlacemarkMapObject>()
+
+                                    // Рисуем каждый маршрут
+                                    routes.forEachIndexed { routeIndex, route ->
+                                        val routeColor = getRouteColor(route.typeId, routeIndex)
+
+                                        route.directions.forEach { direction ->
+                                            val points = direction.stops
+                                                .mapNotNull { routeStop ->
+                                                    stopsMap[routeStop.stopId]?.point
+                                                }
+                                                .map { coords ->
+                                                    Point(coords[0], coords[1])
+                                                }
+
+                                            if (points.size >= 2) {
+                                                // Рисуем полилинию маршрута
+                                                val polylineObj: PolylineMapObject =
+                                                    mapObjects.addPolyline(Polyline(points))
+                                                polylineObj.setStrokeColor(routeColor)
+                                                polylineObj.setStrokeWidth(5f)
+
+                                                // Создаём сглаженный маршрут
+                                                val smoothedRoute = createSmoothRoute(points)
+
+                                                // Создаём движущиеся автобусы для этого направления
+                                                val buses = createMovingBusesForRoute(
+                                                    context,
+                                                    mapObjects,
+                                                    smoothedRoute,
+                                                    points, // оригинальные точки остановок
+                                                    route.typeId,
+                                                    10 // количество автобусов
+                                                )
+                                                busesForRoutes.addAll(buses)
+                                            }
+
+                                            // Добавляем маркеры остановок
+                                            direction.stops.forEach { routeStop ->
+                                                stopsMap[routeStop.stopId]?.let { stop ->
+                                                    val point = Point(
+                                                        stop.point[0],
+                                                        stop.point[1]
+                                                    )
+                                                    val bitmap = getBitmapFromVectorDrawable(
+                                                        context,
+                                                        getStopMarkerResource(route.typeId)
+                                                    )
+                                                    val placemark = mapObjects.addPlacemark(
+                                                        point,
+                                                        ImageProvider.fromBitmap(bitmap)
+                                                    )
+
+                                                    // Изначально скрываем остановки
+                                                    placemark.isVisible = false
+
+                                                    // Можно добавить данные для popup
+                                                    placemark.userData = stop.name.ru
+
+                                                    stopsPlacemarksList.add(placemark)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Обновляем состояние списков автобусов и остановок
+                                    movingBuses = busesForRoutes
+                                    stopPlacemarks = stopsPlacemarksList
+
+                                    // Слушатель изменения камеры для управления видимостью остановок
+                                    map.addCameraListener(object : CameraListener {
+                                        override fun onCameraPositionChanged(
+                                            map: Map,
+                                            cameraPosition: CameraPosition,
+                                            cameraUpdateReason: com.yandex.mapkit.map.CameraUpdateReason,
+                                            finished: Boolean
+                                        ) {
+                                            val shouldShowStops = cameraPosition.zoom >= minZoomForStops
+                                            stopPlacemarks.forEach { placemark ->
+                                                placemark.isVisible = shouldShowStops
+                                            }
+                                        }
+                                    })
+
+                                    // Сразу проинициализируем видимость остановок
+                                    val initialZoom = map.cameraPosition.zoom
+                                    val shouldShowStops = initialZoom >= minZoomForStops
+                                    stopPlacemarks.forEach { placemark ->
+                                        placemark.isVisible = shouldShowStops
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
             }
 
-            // Карта
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                if (isLoading) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
+            // === FAB: Центрировать на местоположении пользователя ===
+            FloatingActionButton(
+                onClick = {
+                    val mv = mapViewRef
+                    if (mv == null) {
+                        // MapView ещё не готов
+                        return@FloatingActionButton
                     }
-                } else {
-                    AndroidView(
-                        factory = { ctx ->
-                            MapView(ctx).apply {
-                                // Находим все точки маршрутов для установки камеры
-                                val allPoints = routes
-                                    .flatMap { route ->
-                                        route.directions.flatMap { dir -> dir.stops }
-                                    }
-                                    .mapNotNull { routeStop ->
-                                        stopsMap[routeStop.stopId]?.point
-                                    }
-                                    .map { coords -> Point(coords[0], coords[1]) }
 
-                                if (allPoints.isNotEmpty()) {
-                                    // Устанавливаем камеру на центр всех точек
-                                    val centerLat = allPoints.map { it.latitude }.average()
-                                    val centerLon = allPoints.map { it.longitude }.average()
-                                    val centerPoint = Point(centerLat, centerLon)
+                    // Проверяем разрешение ACCESS_FINE_LOCATION
+                    val hasFineLocation = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PermissionChecker.PERMISSION_GRANTED
 
-                                    map.move(
-                                        CameraPosition(centerPoint, 12f, 0f, 0f),
+                    if (!hasFineLocation) {
+                        // Можно здесь показать Toast или предложить запросить разрешение
+                        return@FloatingActionButton
+                    }
+
+                    try {
+                        val cts = CancellationTokenSource()
+                        fusedLocationClient
+                            .getCurrentLocation(
+                                com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
+                                cts.token
+                            )
+                            .addOnSuccessListener { location ->
+                                if (location != null) {
+                                    val userPoint = Point(location.latitude, location.longitude)
+
+                                    // Перемещаем камеру к пользователю
+                                    val currentZoom = mv.map.cameraPosition.zoom
+                                    val targetZoom = (currentZoom.coerceAtLeast(10f))
+                                        .coerceAtMost(18f)
+                                    mv.map.move(
+                                        CameraPosition(userPoint, targetZoom, 0f, 0f),
                                         Animation(Animation.Type.SMOOTH, 1f),
                                         null
                                     )
-                                } else {
-                                    // Алматы по умолчанию
-                                    map.move(
-                                        CameraPosition(Point(43.238949, 76.889709), 11f, 0f, 0f),
-                                        Animation(Animation.Type.SMOOTH, 1f),
-                                        null
+
+                                    // Иконка пользователя
+                                    val userBitmap = getBitmapFromVectorDrawable(
+                                        context,
+                                        R.drawable.ic_user_location
                                     )
-                                }
+                                    val userIcon = ImageProvider.fromBitmap(userBitmap)
 
-                                val mapObjects = map.mapObjects
-                                val busesForRoutes = mutableListOf<MovingBus>()
-                                val stopsPlacemarksList = mutableListOf<PlacemarkMapObject>()
-
-                                // Рисуем каждый маршрут
-                                routes.forEachIndexed { routeIndex, route ->
-                                    val routeColor = getRouteColor(route.typeId, routeIndex)
-
-                                    route.directions.forEach { direction ->
-                                        val points = direction.stops
-                                            .mapNotNull { routeStop ->
-                                                stopsMap[routeStop.stopId]?.point
-                                            }
-                                            .map { coords -> Point(coords[0], coords[1]) }
-
-                                        if (points.size >= 2) {
-                                            // Рисуем полилинию маршрута
-                                            val polylineObj: PolylineMapObject =
-                                                mapObjects.addPolyline(Polyline(points))
-                                            polylineObj.setStrokeColor(routeColor)
-                                            polylineObj.setStrokeWidth(5f)
-
-                                            // Создаем сглаженный маршрут для более плавного движения
-                                            val smoothedRoute = createSmoothRoute(points)
-
-                                            // Создаем движущиеся автобусы для этого направления
-                                            val buses = createMovingBusesForRoute(
-                                                context,
-                                                mapObjects,
-                                                smoothedRoute,
-                                                points, // передаем оригинальные точки остановок
-                                                route.typeId,
-                                                10 // количество автобусов на маршрут
-                                            )
-                                            busesForRoutes.addAll(buses)
-                                        }
-
-                                        // Добавляем маркеры остановок
-                                        direction.stops.forEach { routeStop ->
-                                            stopsMap[routeStop.stopId]?.let { stop ->
-                                                val point = Point(stop.point[0], stop.point[1])
-                                                val bitmap = getBitmapFromVectorDrawable(
-                                                    context,
-                                                    getStopMarkerResource(route.typeId)
-                                                )
-                                                val placemark = mapObjects.addPlacemark(
-                                                    point,
-                                                    ImageProvider.fromBitmap(bitmap)
-                                                )
-
-                                                // Изначально скрываем остановки
-                                                placemark.isVisible = false
-
-                                                // Можно добавить пользовательские данные для popup
-                                                placemark.userData = stop.name.ru
-
-                                                // Добавляем в список для управления видимостью
-                                                stopsPlacemarksList.add(placemark)
-                                            }
-                                        }
+                                    if (userPlacemark == null) {
+                                        // Если маркера ещё нет — создаём новый
+                                        val placemark = mv.map.mapObjects.addPlacemark(
+                                            userPoint,
+                                            userIcon
+                                        )
+                                        userPlacemark = placemark
+                                    } else {
+                                        // Если маркер уже добавлен — просто обновляем геометрию
+                                        userPlacemark?.geometry = userPoint
                                     }
-                                }
-
-                                // Обновляем список движущихся автобусов и остановок
-                                movingBuses = busesForRoutes
-                                stopPlacemarks = stopsPlacemarksList
-
-                                // Добавляем слушатель изменения камеры для управления видимостью остановок
-                                map.addCameraListener(object : CameraListener {
-                                    override fun onCameraPositionChanged(
-                                        map: Map,
-                                        cameraPosition: CameraPosition,
-                                        cameraUpdateReason: com.yandex.mapkit.map.CameraUpdateReason,
-                                        finished: Boolean
-                                    ) {
-                                        // Показываем/скрываем остановки в зависимости от зума
-                                        val shouldShowStops = cameraPosition.zoom >= minZoomForStops
-                                        stopPlacemarks.forEach { placemark ->
-                                            placemark.isVisible = shouldShowStops
-                                        }
-                                    }
-                                })
-
-                                // Проверяем начальный зум
-                                val initialZoom = map.cameraPosition.zoom
-                                val shouldShowStops = initialZoom >= minZoomForStops
-                                stopPlacemarks.forEach { placemark ->
-                                    placemark.isVisible = shouldShowStops
                                 }
                             }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
+                            .addOnFailureListener {
+                                // Игнорируем ошибку
+                            }
+                    } catch (se: SecurityException) {
+                        // Если разрешение вдруг отозвано во время работы
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MyLocation,
+                    contentDescription = "Центрировать на мне"
+                )
             }
-
         }
     }
 }
@@ -357,7 +454,10 @@ fun MapScreenWithRoutes(
 /**
  * Находит ближайшую остановку к текущей позиции и возвращает её с индексом
  */
-private fun findNearestStopWithIndex(currentPosition: Point, stopPoints: List<Point>): Pair<Point, Int>? {
+private fun findNearestStopWithIndex(
+    currentPosition: Point,
+    stopPoints: List<Point>
+): Pair<Point, Int>? {
     return stopPoints.mapIndexed { index, stop ->
         Pair(stop, index) to calculateDistance(currentPosition, stop)
     }.minByOrNull { it.second }?.first
@@ -366,7 +466,11 @@ private fun findNearestStopWithIndex(currentPosition: Point, stopPoints: List<Po
 /**
  * Проверяет, находится ли автобус рядом с остановкой
  */
-private fun isNearStop(busPosition: Point, stopPosition: Point, thresholdMeters: Double): Boolean {
+private fun isNearStop(
+    busPosition: Point,
+    stopPosition: Point,
+    thresholdMeters: Double
+): Boolean {
     val distance = calculateDistance(busPosition, stopPosition)
     return distance <= thresholdMeters
 }
@@ -389,7 +493,7 @@ private fun calculateDistance(point1: Point, point2: Point): Double {
 }
 
 /**
- * Создает сглаженный маршрут с дополнительными промежуточными точками
+ * Создаёт сглаженный маршрут с дополнительными промежуточными точками
  */
 private fun createSmoothRoute(originalPoints: List<Point>): List<Point> {
     if (originalPoints.size < 2) return originalPoints
@@ -421,18 +525,22 @@ private fun createSmoothRoute(originalPoints: List<Point>): List<Point> {
 /**
  * Интерполяция между двумя точками
  */
-private fun interpolatePoints(point1: Point, point2: Point, progress: Float): Point {
+private fun interpolatePoints(
+    point1: Point,
+    point2: Point,
+    progress: Float
+): Point {
     val lat = point1.latitude + (point2.latitude - point1.latitude) * progress
     val lon = point1.longitude + (point2.longitude - point1.longitude) * progress
     return Point(lat, lon)
 }
 
 /**
- * Создает движущиеся автобусы для одного маршрута
+ * Создаёт движущиеся автобусы для одного маршрута
  */
 private fun createMovingBusesForRoute(
     context: Context,
-    mapObjects: com.yandex.mapkit.map.MapObjectCollection,
+    mapObjects: MapObjectCollection,
     routePoints: List<Point>,
     stopPoints: List<Point>, // оригинальные точки остановок
     typeId: Int,
@@ -442,7 +550,7 @@ private fun createMovingBusesForRoute(
 
     if (routePoints.size < 2) return buses
 
-    // Создаем иконку автобуса
+    // Создаём иконку автобуса
     val busBitmap = getBitmapFromVectorDrawable(context, getBusMarkerResource(typeId))
     val busImageProvider = ImageProvider.fromBitmap(busBitmap)
 
@@ -460,7 +568,7 @@ private fun createMovingBusesForRoute(
         val nextPoint = routePoints[(startSegment + 1) % routePoints.size]
         val initialPosition = interpolatePoints(currentPoint, nextPoint, startProgress)
 
-        // Создаем плейсмарк для автобуса
+        // Создаём плейсмарк для автобуса
         val busPlacemark = mapObjects.addPlacemark(initialPosition, busImageProvider)
 
         // Добавляем небольшую случайность в скорость для более реалистичного движения
@@ -530,21 +638,21 @@ private fun RouteChip(route: Route) {
 
 private fun getRouteColor(typeId: Int, routeIndex: Int): Int {
     return when (typeId) {
-        0 -> { // Автобусы - оттенки синего
+        0 -> { // Автобусы — оттенки синего
             val blueColors = arrayOf(
                 Color.BLUE, Color.rgb(0, 100, 200), Color.rgb(30, 144, 255),
                 Color.rgb(0, 191, 255), Color.rgb(65, 105, 225)
             )
             blueColors[routeIndex % blueColors.size]
         }
-        1 -> { // Троллейбусы - оттенки красного
+        1 -> { // Троллейбусы — оттенки красного
             val redColors = arrayOf(
                 Color.RED, Color.rgb(220, 20, 60), Color.rgb(255, 69, 0),
                 Color.rgb(255, 99, 71), Color.rgb(178, 34, 34)
             )
             redColors[routeIndex % redColors.size]
         }
-        else -> { // Метро - оттенки зеленого
+        else -> { // Метро — оттенки зелёного
             val greenColors = arrayOf(
                 Color.GREEN, Color.rgb(34, 139, 34), Color.rgb(0, 128, 0),
                 Color.rgb(50, 205, 50), Color.rgb(46, 125, 50)
@@ -560,8 +668,8 @@ private fun getRouteColor(typeId: Int, routeIndex: Int): Int {
 private fun getStopMarkerResource(typeId: Int): Int {
     return when (typeId) {
         0 -> R.drawable.bus_stop
-        1 -> R.drawable.bus_stop // или создайте отдельную иконку для троллейбуса
-        else -> R.drawable.bus_stop // или создайте отдельную иконку для метро
+        1 -> R.drawable.bus_stop // можно заменить на другую иконку
+        else -> R.drawable.bus_stop
     }
 }
 
@@ -570,13 +678,13 @@ private fun getStopMarkerResource(typeId: Int): Int {
  */
 private fun getBusMarkerResource(typeId: Int): Int {
     return when (typeId) {
-        0 -> R.drawable.ic_bus // иконка автобуса
+        0 -> R.drawable.ic_bus       // иконка автобуса
         1 -> R.drawable.ic_trolleybus // иконка троллейбуса
-        else -> R.drawable.ic_metro // иконка метро
+        else -> R.drawable.ic_metro   // иконка метро
     }
 }
 
-/** Вспомогательная функция для конвертации в Bitmap из VectorDrawable */
+/** Вспомогательная функция для конвертации VectorDrawable → Bitmap */
 private fun getBitmapFromVectorDrawable(context: Context, drawableId: Int): Bitmap {
     val drawable = AppCompatResources.getDrawable(context, drawableId)
         ?: error("Drawable not found")
