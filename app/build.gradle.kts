@@ -52,6 +52,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.appcompat.resources)
+    implementation(libs.androidx.tv.material)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -75,7 +76,7 @@ dependencies {
 
 //    implementation ("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    implementation(platform(libs.google.firebase.bom))
-    implementation (libs.firebase.auth.ktx)
-    implementation(libs.firebase.analytics)
+    implementation(platform("com.google.firebase:firebase-bom:33.14.0"))
+    implementation ("com.google.firebase:firebase-auth-ktx:23.2.1")
+    implementation("com.google.firebase:firebase-analytics")
 }
