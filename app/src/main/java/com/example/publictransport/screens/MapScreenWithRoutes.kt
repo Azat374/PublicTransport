@@ -1,5 +1,5 @@
 // MapScreenWithRoutes.kt
-package com.example.publictransport.ui
+package com.example.publictransport.screens
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -36,6 +36,8 @@ import com.yandex.mapkit.geometry.Polyline
 import com.yandex.mapkit.map.CameraPosition
 import com.yandex.mapkit.map.PolylineMapObject
 import com.yandex.mapkit.map.PlacemarkMapObject
+import com.yandex.mapkit.map.CameraListener
+import com.yandex.mapkit.map.Map
 import com.yandex.mapkit.mapview.MapView
 import com.yandex.runtime.image.ImageProvider
 import kotlinx.coroutines.delay
@@ -72,6 +74,12 @@ fun MapScreenWithRoutes(
 
     // Список движущихся автобусов
     var movingBuses by remember { mutableStateOf<List<MovingBus>>(emptyList()) }
+
+    // Список плейсмарков остановок для управления видимостью
+    var stopPlacemarks by remember { mutableStateOf<List<PlacemarkMapObject>>(emptyList()) }
+
+    // Минимальный зум для отображения остановок
+    val minZoomForStops = 14f
 
     LaunchedEffect(Unit) {
         try {
@@ -248,6 +256,7 @@ fun MapScreenWithRoutes(
 
                                 val mapObjects = map.mapObjects
                                 val busesForRoutes = mutableListOf<MovingBus>()
+                                val stopsPlacemarksList = mutableListOf<PlacemarkMapObject>()
 
                                 // Рисуем каждый маршрут
                                 routes.forEachIndexed { routeIndex, route ->
@@ -295,21 +304,52 @@ fun MapScreenWithRoutes(
                                                     ImageProvider.fromBitmap(bitmap)
                                                 )
 
+                                                // Изначально скрываем остановки
+                                                placemark.isVisible = false
+
                                                 // Можно добавить пользовательские данные для popup
                                                 placemark.userData = stop.name.ru
+
+                                                // Добавляем в список для управления видимостью
+                                                stopsPlacemarksList.add(placemark)
                                             }
                                         }
                                     }
                                 }
 
-                                // Обновляем список движущихся автобусов
+                                // Обновляем список движущихся автобусов и остановок
                                 movingBuses = busesForRoutes
+                                stopPlacemarks = stopsPlacemarksList
+
+                                // Добавляем слушатель изменения камеры для управления видимостью остановок
+                                map.addCameraListener(object : CameraListener {
+                                    override fun onCameraPositionChanged(
+                                        map: Map,
+                                        cameraPosition: CameraPosition,
+                                        cameraUpdateReason: com.yandex.mapkit.map.CameraUpdateReason,
+                                        finished: Boolean
+                                    ) {
+                                        // Показываем/скрываем остановки в зависимости от зума
+                                        val shouldShowStops = cameraPosition.zoom >= minZoomForStops
+                                        stopPlacemarks.forEach { placemark ->
+                                            placemark.isVisible = shouldShowStops
+                                        }
+                                    }
+                                })
+
+                                // Проверяем начальный зум
+                                val initialZoom = map.cameraPosition.zoom
+                                val shouldShowStops = initialZoom >= minZoomForStops
+                                stopPlacemarks.forEach { placemark ->
+                                    placemark.isVisible = shouldShowStops
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
             }
+
         }
     }
 }

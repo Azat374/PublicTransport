@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "364689929192",
+    "project_id": "publictransport-7a027",
+    "storage_bucket": "publictransport-7a027.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:364689929192:android:4cffbf326f45bd0e24aa5d",
+        "android_client_info": {
+          "package_name": "com.example.publictransport"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBOamkLUQE61WLhq3PYyIb5ADup6rt3vDs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
